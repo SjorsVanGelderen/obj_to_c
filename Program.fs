@@ -175,14 +175,25 @@ let generateModel = fun (data: Accumulator) ->
 let writeStruct = fun (structName: string) (model: Model) ->
     let fileName = structName + ".obj"
     try
-        let size = model.vertices.Length
-        let start = sprintf "f32 %s[%d] = {\n" structName size
+        let size = model.vertices.Length * 3
+        let start =
+            sprintf "f32 %sVertices[] ATTRIBUTE_ALIGN(32) = {\n" structName
         
         let folder = fun (acc: string) (v: Vertex) ->
             acc + (sprintf "    %5.2fF, %5.2fF, %5.2fF,\n" v.x v.y v.z)
 
-        let text = (List.fold folder start model.vertices) + "};"
+        let verticesString = (List.fold folder start model.vertices)
+        let verticesString = verticesString.[..verticesString.Length - 3]
+        
+        let text =
+            [
+                verticesString
+                sprintf "\n};\n\nstruct Model %s = {" structName
+                sprintf "    .vertices       = %sVertices," structName
+                sprintf "    .verticesAmount = %d\n};" size
+            ] |> String.concat "\n"
         File.WriteAllText (structName + ".c", text)
+        printfn "All done!"
         
     with
         _ -> show <| FailedWrite fileName <| ()

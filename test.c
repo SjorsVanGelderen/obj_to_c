@@ -1,4 +1,4 @@
-f32 test[152] = {
+f32 testVertices[] ATTRIBUTE_ALIGN(32) = {
     -1.00F,  9.00F, -3.00F,
      1.00F,  9.00F, -3.00F,
     -1.00F,  7.00F, -3.00F,
@@ -150,5 +150,11 @@ f32 test[152] = {
     -1.00F,  1.00F, -3.00F,
      1.00F,  1.00F, -3.00F,
     -1.00F, -1.00F,  1.00F,
-    -1.00F, -1.00F, -1.00F,
+    -1.00F, -1.00F, -1.00F
+
+};
+
+struct Model test = {
+    .vertices       = testVertices,
+    .verticesAmount = 456
 };
