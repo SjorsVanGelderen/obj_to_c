@@ -1,4 +1,5 @@
 ﻿(*
+Copyright 2017, Sjors van Gelderen
 Converts Wavefront .obj files to C structs
 *)
 
@@ -163,10 +164,10 @@ let scanFile = fun (structName: string) ->
 
 // Generates the model data from the gathered data
 let generateModel = fun (data: Accumulator) ->
-    let proc = fun (acc: Vertex List) (elem: Index) ->
+    let folder = fun (acc: Vertex List) (elem: Index) ->
         data.vertices.[elem - 1] :: acc
         
-    let vertices = List.fold proc [] data.indices
+    let vertices = List.fold folder [] data.indices
     { vertices = vertices }
 
 
