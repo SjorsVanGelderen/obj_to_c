@@ -18,7 +18,6 @@ type Message =
     | MalformedVertex    of string
     | MalformedFace      of string
     | FileNotFound       of string
-    //| FailedCreate       of string
     | FailedRead         of string
     | FailedWrite        of string
 
@@ -40,11 +39,6 @@ let show (which: Message) = fun () ->
 
     | FileNotFound fileName ->
         printfn "File %A not found" fileName
-
-    (*
-    | FailedCreate fileName ->
-        printfn "Failed to create file %A" fileName
-    *)
     
     | FailedRead fileName ->
         printfn "Failed to read file %A" fileName
@@ -66,31 +60,28 @@ type Vertex =
 type Index = int
 
 
+// Texture coordinate data
+type TexCoord = double
+
+
 // Used to collect information from the file
 type Accumulator =
     {
-        vertices : Vertex List
-        indices  : Index List
+        vertices   : Vertex   List
+        verIndices : Index    List
+        texCoords  : TexCoord List
+        texIndices : Index    List
+        normals    : Index    List
     }
 
 
 let accumulatorZero =
     {
-        vertices = []
-        indices  = []
-    }
-
-
-// Used to store the data for the eventual struct
-type Model =
-    {
-        vertices : Vertex List
-    }
-
-
-let modelZero =
-    {
-        vertices = []
+        vertices   = []
+        verIndices = []
+        texCoords  = []
+        texIndices = []
+        normals    = []
     }
 
 
@@ -106,15 +97,39 @@ let parseVertex = fun (acc: Accumulator) (line: string) ->
         None
 
 
-// Reads index data from a supplied line
-let parseIndices = fun (acc : Accumulator) (line: string) ->
+// Reads texture coordinate data from a supplied line
+let parseTexCoord = fun (acc: Accumulator) (line: string) ->
     let split = line.Split ' '
-    if split.Length = 5 then
-        let indices = [ int split.[4]
-                        int split.[3]
-                        int split.[2]
-                        int split.[1] ]
-        Some { acc with indices = indices @ acc.indices }
+    if split.Length = 3 then
+        Some { acc with texCoords = acc.texCoords @ [ double split.[1]; double split.[2] ] }
+    else
+        None
+
+
+// Reads index data from a supplied line
+let parseFace = fun (acc : Accumulator) (line: string) ->
+    let split = line.Split ' '
+    if split.Length = 4 then
+        let folder = fun (acc: Index List * Index List * Index List) (elem: string) ->
+            let contents = elem.Split '/'
+            if contents.Length = 3 then
+                match acc with
+                | (verIndices, texIndices, normals) ->
+                    (int contents.[0] :: verIndices,
+                     int contents.[1] :: texIndices,
+                     int contents.[2] :: normals)
+            else
+                show <| MalformedFace line <| ()
+                acc
+        
+        let verIndices, texIndices, normals =
+            List.fold folder ([], [], []) <| Array.toList split.[1..]
+        
+        Some { vertices   = acc.vertices
+               verIndices = acc.verIndices @ List.rev verIndices
+               texCoords  = acc.texCoords
+               texIndices = acc.texIndices @ List.rev texIndices
+               normals    = acc.normals    @ List.rev normals   }
     else
         show <| MalformedFace line <| ()
         None
@@ -138,21 +153,25 @@ let scanFile = fun (structName: string) ->
             
             let parseSkip = fun acc _ -> Some acc
             let folder = fun (acc: Accumulator) (line: string) ->
-                let parser =
-                    match line.[0] with
-                    | '#' -> parseSkip
-                    | 'v' -> parseVertex
-                    | 'f' -> parseIndices
-                    | _   ->
-                        show <| UnrecognizedHeader (string line.[0]) <| ()
-                        parseSkip
+                if line.Length > 0 then
+                    let parser =
+                        match line.[0] with
+                        | '#' -> parseSkip
+                        | 'v' -> if line.[1] = 't' then parseTexCoord else parseVertex
+                        | 'f' -> parseFace
+                        | _   ->
+                            show <| UnrecognizedHeader (string line.[0]) <| ()
+                            parseSkip
                 
-                match parser acc line with
-                | Some result -> result
-                | None        -> acc
-        
+                    match parser acc line with
+                    | Some result -> result
+                    | None        -> acc
+                else
+                    // Empty line
+                    acc
+            
             let data = Seq.fold folder accumulatorZero lines
-            Some data
+            Some { data with vertices = List.rev data.vertices }
         with
             | _ ->
                 show <| FailedRead fileName <| ()
@@ -162,35 +181,109 @@ let scanFile = fun (structName: string) ->
         None
 
 
-// Generates the model data from the gathered data
-let generateModel = fun (data: Accumulator) ->
-    let folder = fun (acc: Vertex List) (elem: Index) ->
-        data.vertices.[elem - 1] :: acc
+let processVertices (structName: string) (model: Accumulator) =
+    let verticesAmount = model.vertices.Length
         
-    let vertices = List.fold folder [] data.indices
-    { vertices = vertices }
+    let verticesStart =
+        sprintf "f32 %sVertices[] ATTRIBUTE_ALIGN(32) = {\n" structName
+        
+    let verticesFolder = fun (acc: string) (v: Vertex) ->
+        acc + (sprintf "    %5.2fF, %5.2fF, %5.2fF,\n" v.x v.y v.z)
+            
+    let verticesString = List.fold verticesFolder verticesStart model.vertices
+    verticesString.[..verticesString.Length - 3] + "\n};\n", verticesAmount
 
+
+let processVerIndices (structName: string) (model: Accumulator) =
+    let indicesAmount  = model.verIndices.Length
+
+    let indicesStart =
+        sprintf "u16 %sIndices[] ATTRIBUTE_ALIGN(32) = {\n" structName
+        
+    let indicesFolder = fun (acc: string * int) (i: Index) ->
+        match acc with
+        | (text, count) ->
+            let indent = if count % 3 = 0 then "    " else ""
+            let text'  = text + indent
+            let count' = count + 1
+            if count' % 3 = 0 then
+                (text' + (sprintf "%5d, \n" <| i - 1), count')
+            else
+                (text' + (sprintf "%5d, " <| i - 1), count')
+
+    let indicesFolded = List.fold indicesFolder (indicesStart, 0) model.verIndices
+    let indicesString = match indicesFolded with (text, _) -> text
+    indicesString.[..indicesString.Length - 4] + "\n};\n", indicesAmount
+
+
+let processTexCoords (structName: string) (model: Accumulator) =
+    let texCoordsAmount = model.texCoords.Length
+        
+    let texCoordsStart =
+        sprintf "f32 %sTexCoords[] ATTRIBUTE_ALIGN(32) = {\n" structName
+        
+    let texCoordsFolder = fun (acc: string * int) (vt: TexCoord) ->
+        match acc with
+        | (text, count) ->
+            let indent = if count % 2 = 0 then "    " else ""
+            let text'  = text + indent
+            let count' = count + 1
+            if count' % 2 = 0 then
+                (text' + (sprintf "%2.5fF, \n" <| vt), count')
+            else
+                (text' + (sprintf "%2.5fF, " <| vt), count')
+            
+    let texCoordsFolded = List.fold texCoordsFolder (texCoordsStart, 0) model.texCoords
+    let texCoordsString = match texCoordsFolded with (text, _) -> text
+    texCoordsString.[..texCoordsString.Length - 4] + "\n};\n", texCoordsAmount
+
+
+let processTexIndices (structName: string) (model: Accumulator) =
+    let texIndicesAmount  = model.texIndices.Length
+
+    let texIndicesStart =
+        sprintf "u16 %sTexIndices[] ATTRIBUTE_ALIGN(32) = {\n" structName
+        
+    let texIndicesFolder = fun (acc: string * int) (i: Index) ->
+        match acc with
+        | (text, count) ->
+            let indent = if count % 3 = 0 then "    " else ""
+            let text'  = text + indent
+            let count' = count + 1
+            if count' % 3 = 0 then
+                (text' + (sprintf "%5d, \n" <| i - 1), count')
+            else
+                (text' + (sprintf "%5d, " <| i - 1), count')
+
+    let texIndicesFolded = List.fold texIndicesFolder (texIndicesStart, 0) model.texIndices
+    let texIndicesString = match texIndicesFolded with (text, _) -> text
+    texIndicesString.[..texIndicesString.Length - 4] + "\n};\n", texIndicesAmount
+    
 
 // Writes the struct into a C file
-let writeStruct = fun (structName: string) (model: Model) ->
+let writeStruct = fun (structName: string) (model: Accumulator) ->
     let fileName = structName + ".obj"
     try
-        let size = model.vertices.Length * 3
-        let start =
-            sprintf "f32 %sVertices[] ATTRIBUTE_ALIGN(32) = {\n" structName
-        
-        let folder = fun (acc: string) (v: Vertex) ->
-            acc + (sprintf "    %5.2fF, %5.2fF, %5.2fF,\n" v.x v.y v.z)
-
-        let verticesString = (List.fold folder start model.vertices)
-        let verticesString = verticesString.[..verticesString.Length - 3]
+        let verticesString,   verticesAmount   = processVertices   structName model
+        let verIndicesString, verIndicesAmount = processVerIndices structName model
+        let texCoordsString,  texCoordsAmount  = processTexCoords  structName model
+        let texIndicesString, texIndicesAmount = processTexIndices structName model
         
         let text =
             [
                 verticesString
-                sprintf "\n};\n\nstruct Model %s = {" structName
-                sprintf "    .vertices       = %sVertices," structName
-                sprintf "    .verticesAmount = %d\n};" size
+                verIndicesString
+                texCoordsString
+                texIndicesString
+                sprintf "struct Model %s = {" structName
+                sprintf "    .vertices         = %sVertices,"   structName
+                sprintf "    .verticesAmount   = %d,"           verticesAmount
+                sprintf "    .indices          = %sIndices,"    structName
+                sprintf "    .indicesAmount    = %d,"           verIndicesAmount
+                sprintf "    .texCoords        = %sTexCoords,"  structName
+                sprintf "    .texCoordsAmount  = %d,"           texCoordsAmount
+                sprintf "    .texIndices       = %sTexIndices," structName
+                sprintf "    .texIndicesAmount = %d\n};"        texIndicesAmount
             ] |> String.concat "\n"
         File.WriteAllText (structName + ".c", text)
         printfn "All done!"
@@ -204,7 +297,8 @@ let main = fun args ->
     if argsCheck args then
         let structName = args.[0]
         match scanFile structName with
-        | Some data -> generateModel data |> writeStruct structName
+        | Some data ->
+            data |> writeStruct structName
         | None      -> ()
     
     0
